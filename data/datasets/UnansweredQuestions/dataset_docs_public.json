@@ -1,0 +1,49 @@
+{
+  "rag_questions": [
+    
+    {
+      "question_id": "8e937b74-eb3a-4942-8e21-5a1159a1f175",
+      "question": "What OpenAI APIs are supported by vLLM's OpenAI-compatible server?"
+    },
+    {
+      "question_id": "9dc7f06a-bff9-403c-91d3-10c07b370096",
+      "question": "Where can I find a complete example of structured outputs in vLLM online serving?"
+    },
+    {
+      "question_id": "d30ed96e-b7a7-4700-8bf5-d1f162ff3f5c",
+      "question": "How do you serve the JinaVL-Reranker model using vLLM?"
+    },
+    {
+      "question_id": "26a726a8-e47e-4933-9563-8b888a485464",
+      "question": "Which TPU versions are supported by vLLM for Google Cloud TPU?"
+    },
+    {
+      "question_id": "becefabd-1c2a-4257-b14c-78733bb1407f",
+      "question": "What is the recommended tensor parallel size and pipeline parallel size configuration when running vLLM on a Ray cluster with 16 GPUs across 2 nodes?"
+    },
+    {
+      "question_id": "32302028-1ea8-40ae-87d6-db98e83f7e49",
+      "question": "How can you limit the number of compilation jobs when building vLLM to avoid system overload?"
+    },
+    {
+      "question_id": "dab5d35d-02a9-4ef3-a604-2ef45c2327c2",
+      "question": "How do you access the parsed response from OpenAI's structured output completion in vLLM?"
+    },
+    {
+      "question_id": "0489281a-086d-4851-92ba-c593525fbe36",
+      "question": "What flag is mandatory to enable automatic function calling in vLLM?"
+    },
+    {
+      "question_id": "b5191cd4-9b74-4211-9e60-6272498deae3",
+      "question": "How do you apply chat templates to prompts in vLLM?"
+    },
+    {
+      "question_id": "db4f05fe-78bf-402f-b02f-630d0a3959c3",
+      "question": "What is the first step to implement a basic vLLM model?"
+    },
+    {
+      "question_id": "4e658668-9e1d-4068-ae99-1f77bab83523",
+      "question": "What flag must be explicitly passed when serving VLM2Vec-Full model in vLLM to run it in embedding mode?"
+    }
+  ]
+}
