@@ -341,10 +341,6 @@
       "question": "Can draft_probs be None in vLLM's rejection sampler and when does this happen?"
     },
     {
-      "question_id": "b18b84c9-0350-4316-bb67-e165ad791ec9",
-      "question": "What string prefix is used to identify SSE comments in vLLM's endpoint request processing?"
-    },
-    {
       "question_id": "a99a010d-4de4-4f17-ac4f-bf31f19db7ea",
       "question": "What parameter type does the copy_operation parameter accept in NixlConnector's set_host_xfer_buffer_ops method?"
     },

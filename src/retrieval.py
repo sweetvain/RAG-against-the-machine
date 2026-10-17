@@ -1,14 +1,14 @@
-"""Recherche : chargement de l'index et exécution des requêtes BM25."""
+"""Recherche : chargement de l'index et execution des requetes BM25."""
 
 import json
 import logging
+import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import bm25s
-import pickle
-from tqdm import tqdm
 import pydantic
+from tqdm import tqdm
 
 from src.ingestion import tokenize_corpus
 from src.models import (
@@ -20,42 +20,57 @@ from src.models import (
 
 logger = logging.getLogger(__name__)
 
-def load_index(index_directory: str) -> Tuple[bm25s.BM25, List[Dict[str, Any]]]:
-    """Charge l'index BM25 et les métadonnées des chunks depuis le disque.
+
+def load_index(
+    index_directory: str,
+) -> Tuple[bm25s.BM25, List[Dict[str, Any]]]:
+    """Charge l'index BM25 et les metadonnees des chunks depuis le disque.
 
     Args:
-        index_directory: Répertoire contenant bm25_index/ et
+        index_directory: Repertoire contenant bm25_index/ et
             chunks_metadata.pkl, produits par build_and_save_index.
 
     Returns:
-        Un tuple (retriever, chunks_metadata) où retriever est l'index
-        BM25 rechargé et chunks_metadata la liste des chunks dans le
-        même ordre que celui utilisé à l'indexation (l'indice i d'un
-        résultat BM25 correspond à chunks_metadata[i]).
+        Un tuple (retriever, chunks_metadata) ou retriever est l'index
+        BM25 recharge et chunks_metadata la liste des chunks dans le
+        meme ordre que celui utilise a l'indexation (l'indice i d'un
+        resultat BM25 correspond a chunks_metadata[i]).
 
     Raises:
-        FileNotFoundError: Si l'index ou les métadonnées sont absents.
+        FileNotFoundError: Si l'index ou les metadonnees sont absents.
     """
     bm25_path = Path(index_directory) / "bm25_index"
     chunks_metadata_path = Path(index_directory) / "chunks_metadata.pkl"
 
     if not bm25_path.exists() or not chunks_metadata_path.exists():
-        raise FileNotFoundError(f"Index introuvable dans {index_directory} (bm25_index/ ou chunks_metadata.pkl manquant)")
-    
+        raise FileNotFoundError(
+            f"Index introuvable dans {index_directory} "
+            "(bm25_index/ ou chunks_metadata.pkl manquant)"
+        )
+
     try:
         retriever = bm25s.BM25.load(str(bm25_path), load_corpus=False)
-    except Exception as er:
-        logger.error("Echec du chargement de l'index depuis %s: %s", index_directory, er)
+    except Exception as exc:
+        logger.error(
+            "Echec du chargement de l'index depuis %s: %s",
+            index_directory,
+            exc,
+        )
         raise
-    
+
     try:
         with chunks_metadata_path.open("rb") as metadata_file:
             chunks_metadata = pickle.load(metadata_file)
     except Exception as exc:
-        logger.error("Echec du chargement des metadonnees depuis %s: %s", index_directory, exc)
+        logger.error(
+            "Echec du chargement des metadonnees depuis %s: %s",
+            index_directory,
+            exc,
+        )
         raise
 
     return retriever, chunks_metadata
+
 
 def search(
     query: str,
@@ -63,49 +78,97 @@ def search(
     chunks_metadata: List[Dict[str, Any]],
     k: int,
 ) -> List[MinimalSource]:
-    """Retourne les k sources les plus pertinentes pour une requête.
+    """Retourne les k sources les plus pertinentes pour une requete.
+
+    La requete est tokenisee avec la meme fonction que le corpus, ce qui
+    permet de retrouver un identifiant cite tel quel ou reformule.
 
     Args:
         query: Question ou texte de recherche.
-        retriever: Index BM25 chargé via load_index.
-        chunks_metadata: Métadonnées des chunks, dans le même ordre
-            que celui utilisé lors de l'indexation.
-        k: Nombre de résultats à retourner.
+        retriever: Index BM25 charge via load_index.
+        chunks_metadata: Metadonnees des chunks, dans le meme ordre
+            que celui utilise lors de l'indexation.
+        k: Nombre de resultats a retourner.
 
     Returns:
-        Liste des k sources les plus pertinentes, triées par
-        pertinence décroissante. Liste vide si la requête est vide,
-        si k vaut 0, ou si le corpus est plus petit que k.
+        Liste des k sources les plus pertinentes, triees par
+        pertinence decroissante. Liste vide si la requete est vide ou
+        ne contient aucun terme utile, si k vaut 0, ou si le corpus
+        est vide.
     """
     effective_k = min(k, len(chunks_metadata))
     if not query.strip() or effective_k <= 0:
         return []
 
     query_tokens = tokenize_corpus([query])
-    results, scores = retriever.retrieve(query_tokens, k=effective_k)
+    if not query_tokens[0]:
+        return []
 
-    sources = []
-    for idx in results[0]:
+    # On récupère un peu plus de candidats que nécessaire pour laisser une
+    # seconde passe légère remettre en avant les vrais fichiers de
+    # documentation, souvent noyés par des tests ou des exemples proches.
+    retrieval_window = min(max(effective_k * 15, effective_k), min(len(chunks_metadata), 300))
+    results, scores = retriever.retrieve(query_tokens, k=retrieval_window)
+
+    query_terms = set(query_tokens[0])
+    reranked_candidates = []
+    for idx, score in zip(results[0], scores[0]):
+        candidate = chunks_metadata[int(idx)]["metadata"]
+        adjusted_score = float(score) + _candidate_bonus(candidate, query_terms)
+        reranked_candidates.append((adjusted_score, float(score), int(idx)))
+
+    reranked_candidates.sort(reverse=True)
+
+    sources: List[MinimalSource] = []
+    for _adjusted_score, _base_score, idx in reranked_candidates[:effective_k]:
         meta = chunks_metadata[idx]["metadata"]
         sources.append(MinimalSource.model_validate(meta))
     return sources
-    
+
+
+def _candidate_bonus(
+    source: MinimalSource,
+    query_terms: set[str],
+) -> float:
+    """Applique un petit bonus heuristique aux fichiers de documentation.
+
+    La première passe BM25 garde le gros du signal lexical. Cette fonction ne
+    fait qu'un réordonnancement local des meilleurs candidats pour favoriser
+    les fichiers Markdown et les chemins `docs/`, qui correspondent très
+    souvent aux sources de référence du dataset docs.
+    """
+    path = Path(source.file_path)
+    path_text = path.as_posix().lower()
+
+    bonus = 0.0
+    if "/docs/" in path_text:
+        bonus += 0.80
+    if path.suffix == ".md":
+        bonus += 0.30
+    if any(part in {"tests", "examples", "benchmarks", ".buildkite"} for part in path.parts):
+        bonus -= 0.50
+
+    path_terms = set(tokenize_corpus([source.file_path])[0])
+    overlap = len(query_terms & path_terms)
+    bonus += min(overlap, 5) * 0.12
+
+    return bonus
 
 
 def load_dataset_questions(dataset_path: str) -> List[Dict[str, Any]]:
     """Charge et valide les questions d'un dataset JSON via pydantic.
 
     Args:
-        dataset_path: Chemin vers un fichier JSON conforme au modèle
-            RagDataset (clé "questions").
+        dataset_path: Chemin vers un fichier JSON conforme au modele
+            RagDataset (cle "rag_questions").
 
     Returns:
         Liste de dicts avec au moins "question_id" et "question".
 
     Raises:
         FileNotFoundError: Si le fichier n'existe pas.
-        ValueError: Si le JSON est malformé ou ne respecte pas le
-            schéma RagDataset.
+        ValueError: Si le JSON est malforme ou ne respecte pas le
+            schema RagDataset.
     """
     if not Path(dataset_path).exists():
         raise FileNotFoundError(f"Le fichier {dataset_path} n'existe pas")
@@ -113,15 +176,20 @@ def load_dataset_questions(dataset_path: str) -> List[Dict[str, Any]]:
     try:
         with open(dataset_path, "r", encoding="utf-8") as file:
             raw_data = json.load(file)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Le fichier {dataset_path} est malformé: {exc}")
-    
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"Le fichier {dataset_path} est malforme: {exc}"
+        ) from exc
+
     try:
         rag_dataset = RagDataset.model_validate(raw_data)
     except pydantic.ValidationError as exc:
-        raise ValueError(f"Le dataset ne respecte pas le schema attendu: {exc}")
+        raise ValueError(
+            f"Le dataset ne respecte pas le schema attendu: {exc}"
+        ) from exc
 
     return [question.model_dump() for question in rag_dataset.rag_questions]
+
 
 def search_dataset(
     dataset_path: str,
@@ -129,24 +197,24 @@ def search_dataset(
     save_directory: str,
     index_directory: str = "data/processed",
 ) -> StudentSearchResults:
-    """Exécute la recherche BM25 sur toutes les questions d'un dataset.
+    """Execute la recherche BM25 sur toutes les questions d'un dataset.
 
     Args:
         dataset_path: Chemin vers le fichier JSON de questions
             (UnansweredQuestions ou AnsweredQuestions).
-        k: Nombre de sources à retourner par question.
-        save_directory: Répertoire où écrire le résultat JSON,
-            conforme au modèle StudentSearchResults.
-        index_directory: Répertoire contenant l'index BM25 construit
+        k: Nombre de sources a retourner par question.
+        save_directory: Repertoire ou ecrire le resultat JSON,
+            conforme au modele StudentSearchResults.
+        index_directory: Repertoire contenant l'index BM25 construit
             par la commande index.
 
     Returns:
-        L'objet StudentSearchResults produit, également écrit sur
+        L'objet StudentSearchResults produit, egalement ecrit sur
         disque dans save_directory.
 
     Raises:
         FileNotFoundError: Si le dataset ou l'index sont introuvables.
-        ValueError: Si le dataset est malformé.
+        ValueError: Si le dataset est malforme.
     """
     retriever, chunks_metadata = load_index(index_directory)
     questions = load_dataset_questions(dataset_path)
@@ -158,13 +226,13 @@ def search_dataset(
             MinimalSearchResults(
                 question_id=question["question_id"],
                 question=question["question"],
-                retrieved_sources=sources
+                retrieved_sources=sources,
             )
         )
-    
+
     student_search_results = StudentSearchResults(
         search_results=search_results,
-        k=k
+        k=k,
     )
 
     output_dir = Path(save_directory)
@@ -174,10 +242,11 @@ def search_dataset(
         with output_path.open("w", encoding="utf-8") as output_file:
             output_file.write(student_search_results.model_dump_json(indent=2))
     except OSError as exc:
-        logger.error("Echec de l'ecriture des resultats dans %s: %s", output_path, exc)
+        logger.error(
+            "Echec de l'ecriture des resultats dans %s: %s", output_path, exc
+        )
         raise
 
-    logger.info("Resultats de recherche sauvegardees dans %s", output_path)
+    logger.info("Resultats de recherche sauvegardes dans %s", output_path)
 
     return student_search_results
-

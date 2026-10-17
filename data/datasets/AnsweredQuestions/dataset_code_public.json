@@ -1191,20 +1191,6 @@
       "is_valid": true
     },
     {
-      "question_id": "b18b84c9-0350-4316-bb67-e165ad791ec9",
-      "question": "What string prefix is used to identify SSE comments in vLLM's endpoint request processing?",
-      "answer": "SSE comments are identified by starting with a colon (\":\"). These chunks are skipped during processing as they are not JSON data payload and are often used as pings.",
-      "sources": [
-        {
-          "file_path": "data/raw/vllm-0.10.1/vllm/benchmarks/lib/endpoint_request_func.py",
-          "first_character_index": 2791,
-          "last_character_index": 3900
-        }
-      ],
-      "difficulty": "synthetic",
-      "is_valid": true
-    },
-    {
       "question_id": "a99a010d-4de4-4f17-ac4f-bf31f19db7ea",
       "question": "What parameter type does the copy_operation parameter accept in NixlConnector's set_host_xfer_buffer_ops method?",
       "answer": "The copy_operation parameter accepts type CopyBlocksOp in the set_host_xfer_buffer_ops method.",
