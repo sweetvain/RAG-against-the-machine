@@ -1,9 +1,3 @@
-"""Lecture, chunking et indexation BM25 du depot.
-
-Ce module lit les fichiers du depot, les decoupe en chunks, puis construit
-et sauvegarde un index de recherche BM25.
-"""
-
 import logging
 import pickle
 import re
@@ -18,20 +12,17 @@ from src.models import MinimalSource
 
 logger = logging.getLogger(__name__)
 
-# Un identifiant: lettres, chiffres et "_" (ex: get_kv_cache_manager).
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# Sous-mots d'un identifiant: KVCacheManager -> KV, Cache, Manager.
 _PARTS = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
 _STOPWORDS = frozenset(STOPWORDS_EN)
 
 
 def _normalize_token(token: str) -> str:
-    """Ramene un mot vers une forme plus stable pour la recherche BM25.
+    """Normalizes a token to a more stable form for BM25 matching.
 
-    L'objectif n'est pas de faire un stemming linguistique parfait, mais de
-    rapprocher des variantes simples comme `implement` / `implements`,
-    `support` / `supported` ou `rerank` / `reranking` afin d'augmenter le
-    rappel sans introduire de dépendance lourde.
+    The goal is not perfect stemming, but to merge simple variants such as
+    `implement` / `implements`, `support` / `supported`, and `rerank` /
+    `reranking` to improve recall without adding a heavy dependency.
     """
     if len(token) > 5 and token.endswith("ing"):
         base = token[:-3]
@@ -58,27 +49,24 @@ def read_repository(
     repo_path: str,
     extensions: Tuple[str, ...] = (".py", ".md"),
 ) -> List[Path]:
-    """Parcourt le depot et retourne la liste des fichiers valides.
+    """Walks the repository and returns the list of valid files.
 
     Args:
-        repo_path: Racine du depot a parcourir.
-        extensions: Extensions de fichiers a conserver.
+        repo_path: Root directory to scan.
+        extensions: File extensions to keep.
 
     Returns:
-        Liste des fichiers dont l'extension est autorisee.
+        List of files whose extension is allowed.
 
     Raises:
-        ValueError: Si le chemin n'existe pas ou n'est pas un dossier.
+        ValueError: If the provided path does not exist or is not a directory.
     """
     path = Path(repo_path)
     if not path.exists() or not path.is_dir():
-        raise ValueError(
-            f"The path {repo_path} is invalid or does not exist"
-        )
+        raise ValueError(f"The path {repo_path} is invalid or does not exist")
 
     valid_files = [
-        f for f in path.rglob("*")
-        if f.suffix in extensions and f.is_file()
+        f for f in path.rglob("*") if f.suffix in extensions and f.is_file()
     ]
     return valid_files
 
@@ -87,44 +75,42 @@ def chunk_section(
     file_path: Path,
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Choisit la strategie de chunking selon l'extension du fichier.
+    """Chooses the chunking strategy based on the file extension.
 
     Args:
-        file_path: Chemin du fichier a decouper.
-        max_chunk_size: Taille maximale en caracteres d'un chunk.
+        file_path: File to split into chunks.
+        max_chunk_size: Maximum number of characters in one chunk.
 
     Returns:
-        Liste de chunks {"content": str, "metadata": dict}. Liste vide
-        si le fichier est illisible.
+        A list of chunks as dictionaries with "content" and "metadata". Empty
+        list if the file is unreadable.
     """
     try:
         content = file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        logger.warning(
-            "Impossible de decoder %s avec UTF-8. Ignore.", file_path
-        )
+        logger.warning("Unable to decode %s with UTF-8. Ignoring.", file_path)
         return []
     except OSError as exc:
-        logger.warning(
-            "Erreur de lecture du fichier %s: %s. Ignore.", file_path, exc
-        )
+        logger.warning("Error reading file %s: %s. Ignoring.", file_path, exc)
         return []
 
-    # On garde les sauts de ligne pour que les indices restent exacts.
     lines = content.splitlines(keepends=True)
 
     if file_path.suffix == ".md":
-        return chunk_md_file(
-            file_path, lines, max_chunk_size=max_chunk_size
-        )
+        return chunk_md_file(file_path, lines, max_chunk_size=max_chunk_size)
 
     if file_path.suffix == ".py":
         return chunk_python_file(
-            file_path, lines, max_chunk_size=max_chunk_size
+            file_path,
+            lines,
+            max_chunk_size=max_chunk_size,
         )
 
-    # Fallback pour les fichiers non geres specifiquement.
-    return chunk_other_file(file_path, lines, max_chunk_size=max_chunk_size)
+    return chunk_other_file(
+        file_path,
+        lines,
+        max_chunk_size=max_chunk_size,
+    )
 
 
 def chunk_md_file(
@@ -132,15 +118,15 @@ def chunk_md_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Decoupe un fichier Markdown en chunks par en-tetes (#, ##...).
+    """Splits a Markdown file into chunks by headings (#, ##, ...).
 
     Args:
-        file_path: Chemin du fichier source.
-        lines: Lignes du fichier (splitlines(keepends=True)).
-        max_chunk_size: Taille maximale en caracteres d'un chunk.
+        file_path: Source file path.
+        lines: File lines from splitlines(keepends=True).
+        max_chunk_size: Maximum number of characters in one chunk.
 
     Returns:
-        Liste de chunks {"content": str, "metadata": dict}.
+        A list of chunks with "content" and "metadata" entries.
     """
     chunks: List[Dict[str, Any]] = []
     current_chunk_content = ""
@@ -149,7 +135,48 @@ def chunk_md_file(
 
     for line in lines:
         if line.strip().startswith("#") and current_chunk_content:
-            chunks.append({
+            chunks.append(
+                {
+                    "content": current_chunk_content.strip(),
+                    "metadata": MinimalSource(
+                        file_path=str(file_path),
+                        first_character_index=chunk_start_index,
+                        last_character_index=(
+                            chunk_start_index + len(current_chunk_content) - 1
+                        ),
+                    ).model_dump(),
+                }
+            )
+            current_chunk_content = ""
+            chunk_start_index = current_char_index
+
+        current_chunk_content += line
+
+        if len(current_chunk_content) > max_chunk_size:
+            split_point = current_chunk_content.rfind("\n", 0, max_chunk_size)
+            if split_point == -1:
+                split_point = max_chunk_size
+
+            chunks.append(
+                {
+                    "content": current_chunk_content[:split_point].strip(),
+                    "metadata": MinimalSource(
+                        file_path=str(file_path),
+                        first_character_index=chunk_start_index,
+                        last_character_index=(
+                            chunk_start_index + split_point - 1
+                        ),
+                    ).model_dump(),
+                }
+            )
+            current_chunk_content = current_chunk_content[split_point:]
+            chunk_start_index += split_point
+
+        current_char_index += len(line)
+
+    if current_chunk_content:
+        chunks.append(
+            {
                 "content": current_chunk_content.strip(),
                 "metadata": MinimalSource(
                     file_path=str(file_path),
@@ -158,43 +185,8 @@ def chunk_md_file(
                         chunk_start_index + len(current_chunk_content) - 1
                     ),
                 ).model_dump(),
-            })
-            current_chunk_content = ""
-            chunk_start_index = current_char_index
-
-        current_chunk_content += line
-
-        if len(current_chunk_content) > max_chunk_size:
-            split_point = current_chunk_content.rfind(
-                "\n", 0, max_chunk_size
-            )
-            if split_point == -1:
-                split_point = max_chunk_size
-
-            chunks.append({
-                "content": current_chunk_content[:split_point].strip(),
-                "metadata": MinimalSource(
-                    file_path=str(file_path),
-                    first_character_index=chunk_start_index,
-                    last_character_index=chunk_start_index + split_point - 1,
-                ).model_dump(),
-            })
-            current_chunk_content = current_chunk_content[split_point:]
-            chunk_start_index += split_point
-
-        current_char_index += len(line)
-
-    if current_chunk_content:
-        chunks.append({
-            "content": current_chunk_content.strip(),
-            "metadata": MinimalSource(
-                file_path=str(file_path),
-                first_character_index=chunk_start_index,
-                last_character_index=(
-                    chunk_start_index + len(current_chunk_content) - 1
-                ),
-            ).model_dump(),
-        })
+            }
+        )
 
     return chunks
 
@@ -204,15 +196,15 @@ def chunk_python_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Decoupe un fichier Python en chunks par definitions (def/class).
+    """Splits a Python file into chunks by definitions (def/class).
 
     Args:
-        file_path: Chemin du fichier source.
-        lines: Lignes du fichier (splitlines(keepends=True)).
-        max_chunk_size: Taille maximale en caracteres d'un chunk.
+        file_path: Source file path.
+        lines: File lines from splitlines(keepends=True).
+        max_chunk_size: Maximum number of characters in one chunk.
 
     Returns:
-        Liste de chunks {"content": str, "metadata": dict}.
+        A list of chunks with "content" and "metadata" entries.
     """
     chunks: List[Dict[str, Any]] = []
     current_chunk_content = ""
@@ -226,7 +218,48 @@ def chunk_python_file(
             or stripped_line.startswith("class ")
         )
         if is_definition and current_chunk_content:
-            chunks.append({
+            chunks.append(
+                {
+                    "content": current_chunk_content.strip(),
+                    "metadata": MinimalSource(
+                        file_path=str(file_path),
+                        first_character_index=chunk_start_index,
+                        last_character_index=(
+                            chunk_start_index + len(current_chunk_content) - 1
+                        ),
+                    ).model_dump(),
+                }
+            )
+            current_chunk_content = ""
+            chunk_start_index = current_char_index
+
+        current_chunk_content += line
+
+        if len(current_chunk_content) > max_chunk_size:
+            split_point = current_chunk_content.rfind("\n", 0, max_chunk_size)
+            if split_point == -1:
+                split_point = max_chunk_size
+
+            chunks.append(
+                {
+                    "content": current_chunk_content[:split_point].strip(),
+                    "metadata": MinimalSource(
+                        file_path=str(file_path),
+                        first_character_index=chunk_start_index,
+                        last_character_index=(
+                            chunk_start_index + split_point - 1
+                        ),
+                    ).model_dump(),
+                }
+            )
+            current_chunk_content = current_chunk_content[split_point:]
+            chunk_start_index += split_point
+
+        current_char_index += len(line)
+
+    if current_chunk_content:
+        chunks.append(
+            {
                 "content": current_chunk_content.strip(),
                 "metadata": MinimalSource(
                     file_path=str(file_path),
@@ -235,43 +268,8 @@ def chunk_python_file(
                         chunk_start_index + len(current_chunk_content) - 1
                     ),
                 ).model_dump(),
-            })
-            current_chunk_content = ""
-            chunk_start_index = current_char_index
-
-        current_chunk_content += line
-
-        if len(current_chunk_content) > max_chunk_size:
-            split_point = current_chunk_content.rfind(
-                "\n", 0, max_chunk_size
-            )
-            if split_point == -1:
-                split_point = max_chunk_size
-
-            chunks.append({
-                "content": current_chunk_content[:split_point].strip(),
-                "metadata": MinimalSource(
-                    file_path=str(file_path),
-                    first_character_index=chunk_start_index,
-                    last_character_index=chunk_start_index + split_point - 1,
-                ).model_dump(),
-            })
-            current_chunk_content = current_chunk_content[split_point:]
-            chunk_start_index += split_point
-
-        current_char_index += len(line)
-
-    if current_chunk_content:
-        chunks.append({
-            "content": current_chunk_content.strip(),
-            "metadata": MinimalSource(
-                file_path=str(file_path),
-                first_character_index=chunk_start_index,
-                last_character_index=(
-                    chunk_start_index + len(current_chunk_content) - 1
-                ),
-            ).model_dump(),
-        })
+            }
+        )
 
     return chunks
 
@@ -281,19 +279,18 @@ def chunk_other_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Decoupe generique par taille, pour les autres extensions.
+    """Generic size-based splitting for other extensions.
 
-    Aucune extension autre que .py et .md n'est lue par defaut, mais ce
-    filet de securite evite un crash si chunk_section est appelee sur un
-    fichier d'un autre type.
+    No extension other than .py and .md is read by default, but this safety
+    fallback prevents a crash if chunk_section is called on another file type.
 
     Args:
-        file_path: Chemin du fichier source.
-        lines: Lignes du fichier (splitlines(keepends=True)).
-        max_chunk_size: Taille maximale en caracteres d'un chunk.
+        file_path: Source file path.
+        lines: File lines from splitlines(keepends=True).
+        max_chunk_size: Maximum number of characters in one chunk.
 
     Returns:
-        Liste de chunks {"content": str, "metadata": dict}.
+        A list of chunks with "content" and "metadata" entries.
     """
     chunks: List[Dict[str, Any]] = []
     current_chunk_content = ""
@@ -303,7 +300,27 @@ def chunk_other_file(
     for line in lines:
         too_long = len(current_chunk_content) + len(line) > max_chunk_size
         if too_long and current_chunk_content:
-            chunks.append({
+            chunks.append(
+                {
+                    "content": current_chunk_content.strip(),
+                    "metadata": MinimalSource(
+                        file_path=str(file_path),
+                        first_character_index=chunk_start_index,
+                        last_character_index=(
+                            chunk_start_index + len(current_chunk_content) - 1
+                        ),
+                    ).model_dump(),
+                }
+            )
+            current_chunk_content = ""
+            chunk_start_index = current_char_index
+
+        current_chunk_content += line
+        current_char_index += len(line)
+
+    if current_chunk_content:
+        chunks.append(
+            {
                 "content": current_chunk_content.strip(),
                 "metadata": MinimalSource(
                     file_path=str(file_path),
@@ -312,41 +329,24 @@ def chunk_other_file(
                         chunk_start_index + len(current_chunk_content) - 1
                     ),
                 ).model_dump(),
-            })
-            current_chunk_content = ""
-            chunk_start_index = current_char_index
-
-        current_chunk_content += line
-        current_char_index += len(line)
-
-    if current_chunk_content:
-        chunks.append({
-            "content": current_chunk_content.strip(),
-            "metadata": MinimalSource(
-                file_path=str(file_path),
-                first_character_index=chunk_start_index,
-                last_character_index=(
-                    chunk_start_index + len(current_chunk_content) - 1
-                ),
-            ).model_dump(),
-        })
+            }
+        )
 
     return chunks
 
 
 def tokenize_text(text: str) -> List[str]:
-    """Tokenise un texte en gardant les identifiants entiers et leurs parties.
+    """Tokenizes a text while preserving identifiers and their parts.
 
-    Chaque identifiant est conserve tel quel (en minuscules) pour
-    retrouver une citation exacte, et il est aussi decoupe en sous-mots
-    (snake_case et camelCase) pour retrouver une question reformulee.
-    Les mots vides anglais sont retires.
+    Each identifier is kept as-is (lowercased) to recover an exact citation,
+    and it is also split into subwords (snake_case and camelCase) to recover a
+    reformulated query. Stopwords are removed.
 
     Args:
-        text: Texte a tokeniser (contenu d'un chunk ou requete).
+        text: Text to tokenize (chunk content or query).
 
     Returns:
-        Liste de tokens en minuscules.
+        A list of lowercase tokens.
     """
     tokens: List[str] = []
     for ident in _IDENT.findall(text):
@@ -364,16 +364,16 @@ def tokenize_text(text: str) -> List[str]:
 
 
 def tokenize_corpus(texts: List[str]) -> List[List[str]]:
-    """Tokenise une liste de textes avec tokenize_text.
+    """Tokenizes a list of texts using tokenize_text.
 
-    La meme fonction sert a l'indexation et a la requete, ce qui garantit
-    que les deux cotes utilisent le meme vocabulaire.
+    The same function is used for indexing and queries, which guarantees that
+    both sides use the same vocabulary.
 
     Args:
-        texts: Textes a tokeniser.
+        texts: Texts to tokenize.
 
     Returns:
-        Une liste de tokens par texte.
+        A list of token lists, one per input text.
     """
     return [tokenize_text(text) for text in texts]
 
@@ -382,39 +382,35 @@ def build_and_save_index(
     all_chunks: List[Dict[str, Any]],
     save_directory: str,
 ) -> None:
-    """Construit l'index BM25 et le sauvegarde avec les metadonnees.
+    """Builds and saves the BM25 index with chunk metadata.
 
-    Le chemin du fichier est ajoute au texte indexe pour que les termes
-    du chemin (nom de module, dossier) comptent dans la recherche. Le
-    contenu stocke dans les metadonnees reste celui d'origine.
+    The file path is added to the indexed text so that path terms (module name,
+    folder name) participate in retrieval. The stored metadata remains the
+    original one.
 
     Args:
-        all_chunks: Chunks {"content": str, "metadata": dict}.
-        save_directory: Dossier ou ecrire bm25_index/ et
-            chunks_metadata.pkl.
+        all_chunks: Chunks in the form {"content": str, "metadata": dict}.
+        save_directory: Directory where bm25_index/ and chunks_metadata.pkl are
+            written.
 
     Raises:
-        OSError: Si l'ecriture sur disque echoue.
+        OSError: If writing to disk fails.
     """
     if not all_chunks:
-        logger.warning("Aucun chunk a indexer, index vide !")
+        logger.warning("No chunk to index, empty index.")
         return
 
-    logger.info("Indexation de %d chunks en cours...", len(all_chunks))
+    logger.info("Indexing %d chunks...", len(all_chunks))
 
     sources: List[MinimalSource] = [
         MinimalSource.model_validate(chunk["metadata"])
-        for chunk in tqdm(all_chunks, desc="Validation des metadatas")
+        for chunk in tqdm(all_chunks, desc="Validating metadata")
     ]
     corpus_texts = [chunk["content"] for chunk in all_chunks]
     index_texts = []
     for text, source in zip(corpus_texts, sources):
         path = Path(source.file_path)
 
-        # Les fichiers Markdown de documentation sont ceux qui portent le plus
-        # souvent les réponses du jeu de données docs. On répète donc un peu
-        # plus leur nom de fichier et leurs répertoires pour stabiliser le
-        # signal lexical sans changer le contenu réel indexé.
         if path.suffix == ".md" and "/docs/" in path.as_posix():
             prefix = "\n".join(
                 [
@@ -452,12 +448,10 @@ def build_and_save_index(
             )
 
     except OSError as exc:
-        logger.error(
-            "Echec de la sauvegarde de l'index dans %s: %s", output_dir, exc
-        )
+        logger.error("Failed to save the index in %s: %s", output_dir, exc)
         raise
 
-    logger.info("Indexation terminee et sauvegardee dans %s", output_dir)
+    logger.info("Indexing completed and saved in %s", output_dir)
 
 
 def run_ingestion(
@@ -466,33 +460,34 @@ def run_ingestion(
     max_chunk_size: int = 2000,
     extensions: Tuple[str, ...] = (".py", ".md"),
 ) -> List[Dict[str, Any]]:
-    """Lit le depot, decoupe les fichiers et construit l'index.
+    """Reads the repository, splits files, and builds the index.
 
     Args:
-        repo_path: Racine du depot a indexer (ex: data/raw).
-        save_directory: Dossier ou ecrire l'index (ex: data/processed).
-        max_chunk_size: Taille maximale en caracteres d'un chunk.
-        extensions: Extensions de fichiers a indexer.
+        repo_path: Root directory to index (for example: data/raw).
+        save_directory: Directory where the index is saved (for example:
+            data/processed).
+        max_chunk_size: Maximum number of characters in a chunk.
+        extensions: File extensions to index.
 
     Returns:
-        La liste de tous les chunks produits.
+        The complete list of produced chunks.
 
     Raises:
-        ValueError: Si repo_path est invalide.
-        OSError: Si l'ecriture de l'index echoue.
+        ValueError: If repo_path is invalid.
+        OSError: If writing the index fails.
     """
     files = read_repository(repo_path, extensions=extensions)
-    logger.info("Ingestion de %d fichiers depuis %s", len(files), repo_path)
+    logger.info("Ingesting %d files from %s", len(files), repo_path)
 
     all_chunks: List[Dict[str, Any]] = []
     skipped_files: List[Path] = []
 
-    for file_path in tqdm(files, desc="Chunking des fichiers"):
+    for file_path in tqdm(files, desc="Chunking files"):
         try:
             chunks = chunk_section(file_path, max_chunk_size=max_chunk_size)
 
         except Exception as exc:
-            logger.warning("Chunking echoue pour %s: %s", file_path, exc)
+            logger.warning("Chunking failed for %s: %s", file_path, exc)
             skipped_files.append(file_path)
             continue
 
@@ -503,7 +498,7 @@ def run_ingestion(
         all_chunks.extend(chunks)
 
     logger.info(
-        "Chunking termine: %d chunks produits, %d fichiers sans chunk",
+        "Chunking complete: %d chunks produced, %d files without chunk",
         len(all_chunks),
         len(skipped_files),
     )

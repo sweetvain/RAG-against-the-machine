@@ -1,5 +1,3 @@
-"""Génération de réponses avec Qwen/Qwen3-0.6B à partir de sources récupérées."""
-
 import json
 import logging
 from functools import lru_cache
@@ -37,59 +35,58 @@ SYSTEM_PROMPT = (
 def _load_model_and_tokenizer(
     model_name: str = DEFAULT_MODEL_NAME,
 ) -> Tuple[Any, Any, str]:
-    """Charge le modèle et le tokenizer, une seule fois grâce au cache.
+    """Loads the model and tokenizer once using a cache.
 
-    Le cache est essentiel pour answer_dataset : sans lui, le modèle
-    serait rechargé à chaque question (plusieurs secondes par
-    rechargement), rendant tout traitement en lot extrêmement lent.
+    The cache is essential for answer_dataset: without it, the model would be
+    reloaded for each question, making batch processing very slow.
 
     Args:
-        model_name: Identifiant du modèle sur le Hugging Face Hub.
+        model_name: Model identifier on the Hugging Face Hub.
 
     Returns:
-        Un tuple (tokenizer, model, device).
+        A tuple of (tokenizer, model, device).
 
     Raises:
-        RuntimeError: Si le modèle ou le tokenizer ne peuvent pas être
-            chargés (réseau indisponible, modèle introuvable, etc.).
+        RuntimeError: If the model or tokenizer cannot be loaded.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info("Chargement de %s sur %s...", model_name, device)
+    logger.info("Loading %s on %s...", model_name, device)
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
+        tokenizer: Any = AutoTokenizer.from_pretrained(model_name)
+        model: Any = AutoModelForCausalLM.from_pretrained(
             model_name,
             dtype=torch.float32 if device == "cpu" else torch.bfloat16,
         )
     except Exception as exc:
         raise RuntimeError(
-            f"Impossible de charger le modèle {model_name} : {exc}"
+            f"Unable to load model {model_name}: {exc}"
         ) from exc
 
     model.to(device)
     model.eval()
 
-    logger.info("Modèle chargé avec succès.")
+    logger.info("Model loaded successfully.")
     return tokenizer, model, device
 
 
 def _read_source_text(source: MinimalSource) -> str:
-    """Relit le texte exact d'une source depuis le fichier sur disque.
+    """Re-reads the exact source text from disk.
 
     Args:
-        source: Source dont on veut récupérer le contenu textuel.
+        source: Source whose text content we want to retrieve.
 
     Returns:
-        Le texte correspondant à la plage de caractères indiquée, ou
-        une chaîne vide si le fichier est illisible (fichier déplacé,
-        supprimé, erreur d'encodage).
+        The text corresponding to the given character range, or an empty string
+        if the file is unreadable.
     """
     try:
         content = Path(source.file_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
-            "Impossible de relire la source %s : %s", source.file_path, exc
+            "Unable to re-read source %s: %s",
+            source.file_path,
+            exc,
         )
         return ""
 
@@ -101,21 +98,20 @@ def _read_source_text(source: MinimalSource) -> str:
 def _build_context(
     sources: List[MinimalSource], tokenizer: Any, max_context_tokens: int
 ) -> str:
-    """Construit le bloc de contexte à partir des sources récupérées.
+    """Builds the context block from the retrieved sources.
 
-    Ajoute les sources dans l'ordre de pertinence jusqu'à atteindre le
-    budget de tokens autorisé, puis s'arrête : mieux vaut un contexte
-    tronqué mais cohérent qu'un contexte complet qui dépasse la
-    fenêtre de tokens du modèle.
+    Sources are added in relevance order until the allowed token budget is
+    reached. It is better to have a truncated but coherent context than an
+    oversized context that exceeds the model window.
 
     Args:
-        sources: Sources récupérées, triées par pertinence décroissante.
-        tokenizer: Tokenizer utilisé pour compter les tokens.
-        max_context_tokens: Budget maximal de tokens pour le contexte.
+        sources: Retrieved sources, sorted by decreasing relevance.
+        tokenizer: Tokenizer used to count tokens.
+        max_context_tokens: Maximum token budget for the context.
 
     Returns:
-        Le texte de contexte, sources concaténées avec leur origine
-        indiquée. Chaîne vide si aucune source n'a pu être lue.
+        The context text made from the concatenated sources. Empty string if no
+        source could be read.
     """
     blocks = []
     total_tokens = 0
@@ -146,20 +142,18 @@ def generate_answer_from_sources(
     sources: List[MinimalSource],
     model_name: str = DEFAULT_MODEL_NAME,
 ) -> str:
-    """Génère une réponse à une question à partir de sources déjà récupérées.
+    """Generates an answer from a question and already-retrieved sources.
 
     Args:
-        question: Question posée par l'utilisateur.
-        sources: Sources récupérées à utiliser comme contexte.
-        model_name: Modèle à utiliser pour la génération.
+        question: User question.
+        sources: Sources to use as context.
+        model_name: Model used for generation.
 
     Returns:
-        La réponse générée. Chaîne vide si la question est vide (pas
-        d'appel au modèle dans ce cas, cohérent avec le comportement
-        de search() sur une requête vide).
+        The generated answer. Empty string if the question is empty.
     """
     if not question.strip():
-        logger.warning("Question vide reçue, aucune génération effectuée.")
+        logger.warning("Empty question received; no generation performed.")
         return ""
 
     tokenizer, model, device = _load_model_and_tokenizer(model_name)
@@ -167,8 +161,8 @@ def generate_answer_from_sources(
     context = _build_context(sources, tokenizer, MAX_CONTEXT_TOKENS)
     if not context:
         logger.warning(
-            "Aucun contexte disponible pour la question '%s' : les sources "
-            "récupérées n'ont pas pu être lues.",
+            "No context available for the question '%s': the retrieved "
+            "sources could not be read.",
             question,
         )
 
@@ -199,10 +193,15 @@ def generate_answer_from_sources(
             do_sample=False,
         )
 
-    generated_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
-    answer = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+    generated_tokens = output_ids[0][
+        inputs["input_ids"].shape[1]:
+    ]
+    answer = tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True,
+    ).strip()
 
-    return answer
+    return str(answer)
 
 
 def answer(
@@ -210,19 +209,18 @@ def answer(
     k: int,
     index_directory: str = "data/processed",
 ) -> MinimalAnswer:
-    """Répond à une question unique : recherche puis génération.
+    """Answers a single question by searching and then generating.
 
     Args:
-        query: Question à laquelle répondre.
-        k: Nombre de sources à récupérer avant de générer la réponse.
-        index_directory: Répertoire contenant l'index BM25.
+        query: Question to answer.
+        k: Number of sources to retrieve before generation.
+        index_directory: Directory containing the BM25 index.
 
     Returns:
-        Un MinimalAnswer contenant la question, les sources
-        récupérées et la réponse générée.
+        A MinimalAnswer containing the question, retrieved sources, and answer.
 
     Raises:
-        FileNotFoundError: Si l'index est introuvable.
+        FileNotFoundError: If the index is not found.
     """
     retriever, chunks_metadata = load_index(index_directory)
     sources = search(query, retriever, chunks_metadata, k)
@@ -240,53 +238,54 @@ def answer_dataset(
     student_search_results_path: str,
     save_directory: str,
 ) -> StudentSearchResultsAndAnswer:
-    """Génère une réponse pour chaque question d'un StudentSearchResults.
+    """Generates an answer for each question from a StudentSearchResults file.
 
-    Ne relance PAS la recherche : utilise les sources déjà récupérées
-    par une précédente exécution de search_dataset, conformément au
-    CLI attendu par le sujet (VI.6).
+    This does not rerun the search; it reuses the sources already retrieved by
+    a previous search_dataset run.
 
     Args:
-        student_search_results_path: Chemin vers un fichier JSON
-            conforme au modèle StudentSearchResults, produit par
-            search_dataset.
-        save_directory: Répertoire où écrire le résultat JSON,
-            conforme au modèle StudentSearchResultsAndAnswer.
+        student_search_results_path: Path to the JSON file matching the
+            StudentSearchResults schema produced by search_dataset.
+        save_directory: Directory where the JSON result is written,
+            matching the StudentSearchResultsAndAnswer schema.
 
     Returns:
-        L'objet StudentSearchResultsAndAnswer produit, également
-        écrit sur disque dans save_directory.
+        The generated StudentSearchResultsAndAnswer object, also written
+        to disk under save_directory.
 
     Raises:
-        FileNotFoundError: Si le fichier d'entrée est introuvable.
-        ValueError: Si le fichier d'entrée est malformé.
+        FileNotFoundError: If the input file is missing.
+        ValueError: If the input file is malformed.
     """
     path = Path(student_search_results_path)
     if not path.exists():
         raise FileNotFoundError(
-            f"Le fichier {student_search_results_path} n'existe pas"
+            f"The file {student_search_results_path} does not exist"
         )
 
     try:
         raw_data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(
-            f"Le fichier {student_search_results_path} est malformé : {exc}"
+            f"The file {student_search_results_path} is malformed: {exc}"
         ) from exc
 
     try:
         student_results = StudentSearchResults.model_validate(raw_data)
     except pydantic.ValidationError as exc:
         raise ValueError(
-            f"Le fichier ne respecte pas le schéma StudentSearchResults : {exc}"
+            "The file does not respect the StudentSearchResults "
+            f"schema: {exc}"
         ) from exc
 
     answers: List[MinimalAnswer] = []
     for result in tqdm(
-        student_results.search_results, desc="Génération des réponses"
+        student_results.search_results,
+        desc="Generating answers",
     ):
         generated_answer = generate_answer_from_sources(
-            result.question, result.retrieved_sources
+            result.question,
+            result.retrieved_sources,
         )
         answers.append(
             MinimalAnswer(
@@ -313,12 +312,12 @@ def answer_dataset(
         )
     except OSError as exc:
         logger.error(
-            "Echec de l'ecriture des resultats dans %s: %s", output_path, exc
+            "Failed to write results to %s: %s",
+            output_path,
+            exc,
         )
         raise
 
-    logger.info(
-        "Resultats de generation sauvegardes dans %s", output_path
-    )
+    logger.info("Generated results saved in %s", output_path)
 
     return student_results_and_answer

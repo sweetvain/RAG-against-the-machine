@@ -1,52 +1,60 @@
-"""Modèles Pydantic (data validation)"""
+import uuid
+from typing import List
 
 from pydantic import BaseModel, Field
-from typing import List
-import uuid
 
 
 class MinimalSource(BaseModel):
-    """ Represente une source unique: fichier + plage de caracteres """
+    """Represents a single source: file + character range."""
+
     file_path: str
     first_character_index: int
     last_character_index: int
 
 
 class UnansweredQuestion(BaseModel):
-    """ Question sans reponse ni sources associees """
+    """Question without an answer or associated sources."""
+
     question_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     question: str
 
 
 class AnsweredQuestion(UnansweredQuestion):
-    """ Question avec ses sources de reference et sa reponse attendue """
+    """Question with its reference sources and expected answer."""
+
     sources: List[MinimalSource]
     answer: str
 
 
 class MinimalSearchResults(BaseModel):
-    """ Resultats de recherche pour une question donnee """
+    """Search results for a single question."""
+
     question_id: str
     question: str
     retrieved_sources: List[MinimalSource]
 
 
 class MinimalAnswer(MinimalSearchResults):
-    """ Resultats de recherche enrichis d'une reponse generee """
+    """Search results enriched with a generated answer."""
+
     answer: str
 
 
 class RagDataset(BaseModel):
-    """ Datset de question RAG, repondues ou non"""
+    """Dataset of RAG questions, answered or unanswered."""
+
     rag_questions: List[AnsweredQuestion | UnansweredQuestion]
 
 
 class StudentSearchResults(BaseModel):
-    """Sortie attendue pour la commande search_dataset """
+    """Expected output for the search_dataset command."""
+
     search_results: List[MinimalSearchResults]
     k: int
 
+
 class StudentSearchResultsAndAnswer(BaseModel):
-    """Sortie attendue pour la commande answer_dataset """
+    """Expected output for the answer_dataset command."""
+
     search_results: List[MinimalAnswer]
     k: int

@@ -1,7 +1,7 @@
 [project]
 name = "rag-against-the-machine"
 version = "0.1.0"
-description = "Add your description here"
+description = "BM25 retrieval and local generation pipeline for code and documentation corpora"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,6 +21,10 @@ dev = [
     "flake8>=7.3.0",
     "mypy>=2.2.0",
 ]
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }

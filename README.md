@@ -1,24 +1,31 @@
+*This project has been created as part of the 42 curriculum by elal-hai.*
+
 # RAG Against the Machine
 
-42 project implementing a Retrieval-Augmented Generation pipeline over the vLLM v0.10.1 repository.
+This project builds a small retrieval-augmented generation pipeline for a local code and documentation corpus.
 
-The goal is straightforward: index the repository, retrieve the most relevant excerpts for a question, and generate an answer grounded in those excerpts. Official grading is done by the moulinette located in `exams/`.
+The workflow is simple:
+
+- index a corpus of source files,
+- retrieve the most relevant excerpts for a question,
+- generate an answer grounded in those excerpts,
+- evaluate the retrieved sources against a reference dataset.
 
 ## Overview
 
-The pipeline is split into four stages:
+The project is organized in four main stages:
 
-- BM25 ingestion and indexing,
+- ingestion and BM25 indexing,
 - retrieval of relevant sources,
-- answer generation from retrieved context,
-- local `recall@k` evaluation.
+- answer generation from the retrieved context,
+- local recall@k evaluation.
 
 ## Requirements
 
 - Python 3.12+
 - `uv`
-- the vLLM v0.10.1 repository under `data/raw/vllm-0.10.1/`
-- the datasets under `data/datasets/`
+- a corpus directory to index (default: `data/raw`)
+- the public dataset files under `data/datasets/`
 
 ## Installation
 
@@ -26,38 +33,39 @@ The pipeline is split into four stages:
 uv sync
 ```
 
-## Useful Layout
+## Project Layout
 
 ```text
 data/
-  raw/vllm-0.10.1/                 indexed source repository
-  processed/                       BM25 index produced by `index`
-  datasets/AnsweredQuestions/       reference datasets
-  datasets/UnansweredQuestions/     question-only datasets
-  output/                          outputs of `search_dataset` and `answer_dataset`
+  raw/                              optional source corpus to index
+  processed/                        BM25 index written by the ingestion step
+  datasets/AnsweredQuestions/      reference answers for evaluation
+  datasets/UnansweredQuestions/    question-only dataset for retrieval/search
+  output/                           generated search and answer outputs
 src/
-  ingestion.py                     repository walking, chunking, indexing
-  retrieval.py                     index loading and search
-  generation.py                    answer generation from retrieved sources
-  evaluation.py                    local recall@k computation
-  models.py                        shared Pydantic models
-  cli.py                           CLI commands
+  ingestion.py                      repository walking, chunking, index generation
+  retrieval.py                      BM25 loading and retrieval logic
+  generation.py                     answer generation from retrieved context
+  evaluation.py                     local recall@k evaluation
+  models.py                         shared Pydantic data models
+  cli.py                            CLI commands exposed via Fire
 ```
 
-Two summary files are kept for grading notes:
+Two project summaries are included in the repository:
 
 - [RESUME_CHANGEMENTS.md](RESUME_CHANGEMENTS.md)
 - [RESUME_PROJET.md](RESUME_PROJET.md)
 
 ## Main Commands
 
-All commands go through the `src` module:
+All commands are available through the `src` module:
 
 ```bash
-uv run python -m src index --max_chunk_size 2000
-uv run python -m src search "How to configure the OpenAI server?" --k 5
+uv run python -m src --help
+uv run python -m src index --max_chunk_size 2000 --repo_path data/raw --save_directory data/processed
+uv run python -m src search "How to configure the OpenAI server?" --k 5 --index_directory data/processed
 uv run python -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --k 10 --save_directory data/output/search_results/UnansweredQuestions
-uv run python -m src answer "How to configure the OpenAI server?" --k 5
+uv run python -m src answer "How to configure the OpenAI server?" --k 5 --index_directory data/processed
 uv run python -m src answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results_and_answer/UnansweredQuestions
 uv run python -m src evaluate --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --dataset_path data/datasets/AnsweredQuestions/dataset_docs_public.json
 ```
@@ -66,44 +74,45 @@ uv run python -m src evaluate --student_search_results_path data/output/search_r
 
 ### Indexing
 
-`src/ingestion.py` walks the source repository, splits files into chunks, and builds a BM25 index.
+`src/ingestion.py` walks the source corpus, splits files into chunks, and builds a BM25 index.
 
-- `.py` files are split by `def` / `class`,
-- `.md` files are split by sections,
-- other files use a size-based fallback.
+- `.py` files are split by `def` and `class` boundaries,
+- `.md` files are split by their sections,
+- other files fall back to a size-based split.
 
-Each chunk keeps its metadata: `file_path`, `first_character_index`, and `last_character_index`.
+Each chunk keeps metadata such as `file_path`, `first_character_index`, and `last_character_index`.
 
 ### Retrieval
 
-`src/retrieval.py` reloads the index, tokenizes the query with the same logic used for the corpus, and fetches the best sources.
+`src/retrieval.py` loads the index, tokenizes the query with the same logic as the corpus, and retrieves the best matches.
 
-A small reranking pass favors documentation files, which improves docs performance without breaking the output contract.
+The ranking step includes a small reranking adjustment to favor documentation-like sources without changing the required output contract.
 
 ### Generation
 
-`src/generation.py` rereads the exact text of the retrieved sources, builds a token-limited context, and asks `Qwen/Qwen3-0.6B` to produce a concise answer.
+`src/generation.py` reloads the exact retrieved text, builds a token-limited context, and asks the model to answer from that context.
 
 ### Evaluation
 
-`src/evaluation.py` compares retrieved sources against the reference dataset and computes local `recall@k`.
+`src/evaluation.py` compares retrieved sources against the expected dataset and computes a local recall@k score.
 
 ## Output Format
 
-Search results are serialized as `StudentSearchResults`.
+The search results are serialized as `StudentSearchResults`, and answer results as `StudentSearchResultsAndAnswer`.
 
-The format expected by the moulinette is preserved as-is to remain compatible with grading.
+These schemas are kept aligned with the project’s evaluation flow and with the expected grading contract.
 
 ## Validation
 
-The project was validated with the retrieval moulinette provided in `exams/scripts/`.
+The project is validated with the standard local checks:
 
-- indexing: OK
-- search throughput: OK
-- docs recall@5: OK
-- code recall@5: OK
+```bash
+make lint
+```
+
+This runs both `flake8` and `mypy` on the project sources.
 
 ## Notes
 
-- [RESUME_CHANGEMENTS.md](RESUME_CHANGEMENTS.md) summarizes all modifications.
-- [RESUME_PROJET.md](RESUME_PROJET.md) describes the full project in detail.
+- [RESUME_CHANGEMENTS.md](RESUME_CHANGEMENTS.md) summarizes the project changes and cleanup work.
+- [RESUME_PROJET.md](RESUME_PROJET.md) gives a broader project overview.
