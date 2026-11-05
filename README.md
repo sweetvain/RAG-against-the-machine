@@ -191,9 +191,12 @@ a few seconds per question on CPU.
 
 **Use of AI**: I used an AI assistant for the following tasks:
 
-- to understand the notions of the subject that I did not know;
-- to rewrite my code in a cleaner way;
-- to follow the coding standard (the norm);
+- to understand the notions of the subject that I did not know (RAG, BM25 /
+  TF-IDF, chunking, recall@k and IoU, how to give a context to a small
+  model);
+- to rewrite my code in a cleaner way (structure, naming, simpler functions,
+  docstrings);
+- to follow the coding standard (the norm): flake8, mypy and type hints;
 - to write the tests in `tests/` and to help write this README.
 
 I ran every change myself (recall measured on the public datasets, flake8,
