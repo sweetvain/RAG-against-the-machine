@@ -1,0 +1,356 @@
+===============================================================================
+ RAG AGAINST THE MACHINE - EXPLICATION COMPLETE DU PROJET
+===============================================================================
+
+Ce fichier sert de support pour comprendre, reviser et defendre le projet.
+
+
+-------------------------------------------------------------------------------
+1. A QUOI SERT LE PROJET
+-------------------------------------------------------------------------------
+
+Un modele de langage ne connait que ce qu'il a vu a l'entrainement. Il ne
+connait pas le code de vLLM 0.10.1 et il peut inventer une reponse.
+
+Le RAG (Retrieval-Augmented Generation) resout ca sans reentrainer le modele :
+on va chercher les bons extraits dans une base de documents, on les donne au
+modele, et il repond en s'appuyant dessus.
+
+Les 4 etapes :
+  1. INDEXATION   : decouper le corpus en morceaux (chunks) et construire un
+                    index consultable rapidement.
+  2. RETRIEVAL    : pour une question, retrouver les k morceaux les plus
+                    pertinents.
+  3. AUGMENTATION : mettre ces morceaux dans le contexte du modele.
+  4. GENERATION   : le modele (Qwen3-0.6B) ecrit la reponse a partir du contexte.
+
+En plus : une commande "evaluate" qui mesure la qualite de la recherche avec
+le recall@k.
+
+
+-------------------------------------------------------------------------------
+2. STRUCTURE DU DEPOT
+-------------------------------------------------------------------------------
+
+  src/models.py      modeles Pydantic (formats d'echange entre les etapes)
+  src/ingestion.py   lecture du corpus, chunking, tokenisation, index BM25
+  src/retrieval.py   chargement de l'index, recherche, recherche sur dataset
+  src/generation.py  construction du contexte + generation avec Qwen3-0.6B
+  src/evaluation.py  calcul local du recall@k
+  src/cli.py         interface en ligne de commande (Python Fire)
+  src/__main__.py    point d'entree : uv run python -m src <commande>
+  tests/             tests pytest (non soumis, pour verifier le projet)
+  Makefile           install / run / debug / clean / lint / lint-strict
+  .flake8            config flake8 (ligne max 88, exclut .venv et data)
+  .gitignore         exclut caches, .venv, data/raw, data/processed, data/output
+  pyproject.toml     dependances + config mypy
+  uv.lock            versions exactes des dependances (uv sync)
+  data/raw/          corpus a indexer (vLLM 0.10.1) - non versionne
+  data/processed/    index genere par la commande index - non versionne
+  data/datasets/     questions publiques (avec et sans reponses)
+  data/output/       resultats generes - non versionne
+
+
+-------------------------------------------------------------------------------
+3. LES COMMANDES
+-------------------------------------------------------------------------------
+
+  index            lit data/raw, decoupe, construit l'index dans data/processed
+                   option : --max_chunk_size (defaut 2000)
+  search           top-k sources pour UNE question (affichage terminal)
+  search_dataset   top-k pour TOUT un dataset -> JSON StudentSearchResults
+  answer           reponse a UNE question (recherche + generation)
+  answer_dataset   reponses pour tout un fichier de resultats -> JSON
+                   StudentSearchResultsAndAnswer (ne refait pas la recherche)
+  evaluate         recall@1/3/5/10 contre un dataset de reference
+
+Tous les chemins sont des arguments, jamais ecrits en dur.
+
+Deroulement de la defense :
+  index -> search_dataset -> moulinette evaluate_student_search_results
+
+
+-------------------------------------------------------------------------------
+4. LES MODELES PYDANTIC (models.py)
+-------------------------------------------------------------------------------
+
+  MinimalSource           file_path + first_character_index + last_character_index
+                          = une "adresse" dans un fichier
+  UnansweredQuestion      question_id + question
+  AnsweredQuestion        + sources (liste de MinimalSource) + answer
+  RagDataset              liste de questions (avec ou sans reponse)
+  MinimalSearchResults    question_id, question, retrieved_sources
+  MinimalAnswer           + answer
+  StudentSearchResults    search_results + k       (sortie de search_dataset)
+  StudentSearchResultsAndAnswer                    (sortie de answer_dataset)
+
+Pydantic valide les donnees : un JSON malforme leve une erreur propre au lieu
+de planter plus tard.
+
+
+-------------------------------------------------------------------------------
+5. LE CHUNKING (ingestion.py)
+-------------------------------------------------------------------------------
+
+Pourquoi decouper ? Un fichier entier est trop gros et trop dilue : le modele
+a un contexte limite et la recherche serait imprecise.
+
+Deux strategies distinctes (exigees par le sujet) :
+  - Python : nouveau chunk a chaque "def", "async def", "class" ou decorateur
+    (@...). Un decorateur reste attache a sa fonction.
+  - Markdown / texte : nouveau chunk a chaque titre (#, ##, ...). Les "#"
+    dans un bloc de code ``` ne sont PAS des titres. Les .txt sont coupes
+    par taille.
+
+Regle absolue : aucun chunk ne depasse max_chunk_size (2000). La moulinette
+rejette toute la sortie si UNE seule source depasse 2000 caracteres.
+Si un bloc est trop long, on coupe au dernier retour a la ligne, sinon on
+coupe net.
+
+Fonctions cles :
+  _split_by_boundaries : boucle commune (coupe aux "frontieres" + a la taille)
+  _make_chunk          : cree un chunk = tranche EXACTE du fichier
+  chunk_python_file / chunk_md_file / chunk_other_file : choisissent la
+                         fonction "est-ce une frontiere ?"
+
+Points d'attention (bugs corriges) :
+  - Les indices sont des positions de caracteres, premier et dernier INCLUS.
+  - Le contenu du chunk est exactement texte[debut:fin] (pas de strip), donc
+    les indices correspondent toujours au contenu.
+  - Les fichiers sont lus avec newline="" pour ne pas convertir \r\n en \n,
+    sinon les indices sont decales sur Windows.
+  - Les chemins sont ecrits avec "/" (as_posix) car la moulinette compare les
+    chemins mot pour mot. Sans ca, le recall etait de 0 % sous Windows.
+  - max_chunk_size < 1 est refuse (sinon boucle infinie).
+
+
+-------------------------------------------------------------------------------
+6. L'INDEX ET LA RECHERCHE LEXICALE
+-------------------------------------------------------------------------------
+
+BM25 (bibliotheque bm25s) - methode lexicale classique, evolution du TF-IDF.
+Idee : un mot qui apparait souvent dans un chunk (TF) mais rarement dans le
+corpus (IDF) est un bon indice. BM25 ajoute deux corrections : saturation de
+la frequence (le 10e "lora" apporte moins que le 1er) et normalisation par la
+longueur du chunk.
+
+Tokenisation (tokenize_text), identique pour le corpus ET pour la question :
+  - on garde l'identifiant entier : "load_lora_adapter"
+  - ET ses morceaux : "load", "lora", "adapter" (snake_case et camelCase)
+  - minuscules, suppression des stopwords anglais
+  - normalisation legere des suffixes (supported -> support, rerank/reranking)
+Pourquoi : une question peut citer un identifiant exact OU le reformuler. En
+gardant les deux formes on matche les deux cas.
+
+Le chemin du fichier est ajoute au texte indexe : le nom du dossier ou du
+module compte dans la recherche.
+
+Persistance (dans data/processed/) :
+  bm25_index/            index BM25
+  chunks_metadata.pkl    contenu + MinimalSource de chaque chunk, dans le meme
+                         ordre que l'index
+
+
+-------------------------------------------------------------------------------
+7. LE RETRIEVAL (retrieval.py)
+-------------------------------------------------------------------------------
+
+search(query, retriever, chunks_metadata, k) :
+  1. cas degeneres : requete vide, k <= 0, aucun mot utile -> liste vide
+  2. tokenise la question avec la meme fonction que le corpus
+  3. interroge l'index BM25 et prend les k meilleurs chunks
+  4. renvoie ces k chunks sous forme de MinimalSource, du plus pertinent au
+     moins pertinent
+
+Il n'y a pas de re-classement : le classement est celui de BM25. Tout le
+travail est fait par BM25 + la tokenisation (identifiant entier + morceaux).
+
+search_dataset : fait la meme chose pour toutes les questions d'un JSON et
+ecrit un StudentSearchResults dans <save_directory>/<nom du dataset>.json.
+
+
+-------------------------------------------------------------------------------
+8. LA GENERATION (generation.py)
+-------------------------------------------------------------------------------
+
+  1. _read_source_text : relit sur disque le texte EXACT de chaque source via
+     ses indices de caracteres.
+  2. _build_context : ajoute les sources par ordre de pertinence, avec un titre
+     "# Source: chemin [debut:fin]", jusqu'a MAX_CONTEXT_TOKENS (3000). On
+     s'arrete avant de depasser : mieux vaut un contexte coherent tronque
+     qu'un contexte trop long.
+  3. Prompt systeme : "reponds UNIQUEMENT avec le contexte, sinon dis que tu
+     ne sais pas" -> reduit les hallucinations.
+  4. Qwen/Qwen3-0.6B, mode "thinking" desactive, decodage glouton
+     (do_sample=False) -> resultats reproductibles, max 300 nouveaux tokens.
+  5. Le modele est charge UNE fois (lru_cache), sinon answer_dataset serait
+     tres lent.
+
+Le projet marche aussi avec un autre modele (DEFAULT_MODEL_NAME), mais Qwen3
+0.6B reste obligatoire par defaut.
+
+
+-------------------------------------------------------------------------------
+9. L'EVALUATION (evaluation.py)
+-------------------------------------------------------------------------------
+
+Recall@k, par question : (sources de reference retrouvees dans mon top-k) /
+(nombre de sources de reference). Puis moyenne sur les questions.
+
+Une source de reference est "retrouvee" si un de mes resultats est dans le MEME
+fichier et recouvre sa plage de caracteres avec un IoU >= 0.05.
+  IoU = intersection / union des deux plages.
+Seuil tres bas : pas besoin de tomber pile sur la plage, juste la bonne zone du
+bon fichier. Mauvais fichier ou chemin different = 0.
+
+Seuils exiges : docs >= 80 % au recall@5, code >= 50 %.
+La commande evaluate est pour mon usage. Le score officiel vient de la
+moulinette (que le code ne doit jamais importer ni appeler).
+
+
+-------------------------------------------------------------------------------
+10. RESULTATS MESURES
+-------------------------------------------------------------------------------
+
+Config par defaut (chunk 2000), k=10, CPU :
+
+            Recall@1  Recall@3  Recall@5  Recall@10
+  docs       0.640     0.830     0.840     0.860     (exige >= 0.80 au @5)
+  code       0.404     0.646     0.687     0.737     (exige >= 0.50 au @5)
+
+Temps : indexation ~15-50 s (limite 5 min) ; 100 questions ~8 s
+(limite : 200 questions en 90 s).
+
+Effet de --max_chunk_size (recall@5 docs / code) :
+  500  : 0.82 / 0.697
+  1000 : 0.83 / 0.667
+  1500 : 0.84 / 0.697
+  2000 : 0.84 / 0.687   <- defaut (max autorise : moins de chunks)
+Les ecarts sont de 1 a 2 points : la taille de chunk change peu le resultat.
+
+Generation : reponses correctes et ancrees sur les exemples testes (par ex.
+"/v1/load_lora_adapter"), quelques secondes par question sur CPU.
+
+
+-------------------------------------------------------------------------------
+11. ROBUSTESSE (cas limites geres)
+-------------------------------------------------------------------------------
+
+Le CLI ne doit JAMAIS afficher de traceback. Gere :
+  - requete vide ou uniquement des espaces
+  - requete sans mot utile ("!!!???") -> "No result found"
+  - k = 0, k negatif, k non entier ("abc")
+  - max_chunk_size < 1
+  - fichier ou dossier inexistant, index absent
+  - JSON malforme ou qui ne respecte pas le schema
+  - fichier non lisible en UTF-8 (ignore avec un avertissement)
+  - exception inattendue : attrapee dans main() -> message + exit code 1
+
+Les fichiers sont ouverts avec "with" (context managers) : pas de fuite.
+
+
+-------------------------------------------------------------------------------
+12. QUALITE DE CODE ET OUTILS
+-------------------------------------------------------------------------------
+
+  make install       uv sync
+  make run           uv run python -m src --help
+  make debug         pdb (ex : make debug ARGS="index --max_chunk_size 2000")
+  make clean         supprime __pycache__, .mypy_cache, .pytest_cache
+  make lint          flake8 . + mypy avec les options obligatoires
+  make lint-strict   flake8 . + mypy --strict (optionnel)
+
+Verifie : flake8 propre, mypy sans erreur, 8 tests pytest OK.
+mypy et flake8 excluent data/ (sinon mypy analyse le code de vLLM et plante).
+
+
+-------------------------------------------------------------------------------
+13. POINTS CLES A RETENIR (pour la defense)
+-------------------------------------------------------------------------------
+
+ 1. Les 4 etapes d'un RAG : indexer, retrouver, augmenter, generer.
+ 2. BM25 = TF-IDF ameliore (saturation + longueur). On l'utilise car il est
+    rapide, sans GPU, et tres bon quand la question cite des identifiants.
+ 3. Tokenisation : identifiant entier + morceaux (snake/camelCase) ; la MEME
+    fonction pour le corpus et la question.
+ 4. Deux chunkings : Python (def/class/decorateurs), Markdown (titres).
+ 5. Un chunk ne depasse JAMAIS 2000 caracteres (sinon sortie invalide).
+ 6. Les chemins doivent etre identiques mot pour mot : "/" et prefixe
+    data/raw/vllm-0.10.1/...
+ 7. Les indices = positions de caracteres, bornes incluses ; lecture avec
+    newline="" pour eviter le decalage CRLF.
+ 8. IoU >= 0.05 : il suffit de couvrir la bonne zone du bon fichier.
+ 9. Objectifs : docs >= 80 % @5, code >= 50 % @5. Atteints : 84 % et 68.7 %.
+10. Contexte limite en tokens, prompt qui impose de repondre depuis le
+    contexte, decodage glouton, modele charge une seule fois.
+11. Aucun traceback, jamais : toutes les entrees invalides sont gerees.
+12. La moulinette ne doit jamais etre importee dans le code.
+
+
+-------------------------------------------------------------------------------
+14. QUESTIONS PROBABLES EN DEFENSE
+-------------------------------------------------------------------------------
+
+Q : Pourquoi BM25 plutot que des embeddings ?
+R : Plus rapide a indexer, pas de modele supplementaire, et excellent sur du
+    code ou les identifiants sont cites. Les embeddings sont un bonus possible.
+
+Q : Quelle est la difference entre TF-IDF et BM25 ?
+R : BM25 sature l'effet de la frequence et normalise par la longueur du
+    document ; TF-IDF croit lineairement avec la frequence.
+
+Q : Pourquoi decouper en chunks ?
+R : Contexte du modele limite, recherche plus precise, et la moulinette impose
+    des sources de 2000 caracteres maximum.
+
+Q : Que se passe-t-il si une fonction fait plus de 2000 caracteres ?
+R : Elle est coupee au dernier retour a la ligne avant la limite ; chaque
+    morceau reste une tranche exacte du fichier.
+
+Q : Pourquoi garder l'identifiant entier ET ses morceaux ?
+R : Entier pour une citation exacte (load_lora_adapter), morceaux pour une
+    question reformulee ("load lora adapter").
+
+Q : Comment evitez-vous les hallucinations ?
+R : Prompt "uniquement le contexte", contexte constitue des vraies sources
+    relues sur disque, decodage deterministe, "dis que tu ne sais pas".
+
+Q : Pourquoi lire les fichiers avec newline="" ?
+R : Pour garder \r\n tels quels ; sinon les indices de caracteres sont decales
+    par rapport a ceux du dataset.
+
+Q : Que fait l'IoU de 0.05 ?
+R : Un resultat compte s'il recouvre un peu la plage de reference dans le meme
+    fichier.
+
+Q : Modification possible demandee en defense ?
+R : Changer le tokenizer, la taille de chunk, le
+    nombre de tokens de contexte, l'affichage de search, ajouter un champ dans
+    un modele. Savoir ou se trouve chaque chose (voir sections 5 a 8).
+
+
+-------------------------------------------------------------------------------
+15. BONUS POSSIBLES (non implementes)
+-------------------------------------------------------------------------------
+
+Evalues seulement si toute la partie obligatoire est validee :
+  1. Embeddings semantiques (ex : all-MiniLM-L6-v2) a cote de BM25
+  2. Recherche hybride (fusion BM25 + embeddings, ex : RRF)
+  3. Indexation incrementale (ne re-indexer que le fichier modifie)
+  4. Cache de l'index et des requetes
+  5. API HTTP locale pour interroger l'index et repondre aux questions
+
+Un bonus ne compte que s'il est implemente ET fonctionnel.
+
+
+-------------------------------------------------------------------------------
+16. A FAIRE AVANT LE RENDU
+-------------------------------------------------------------------------------
+
+ - Verifier que le premier ligne du README est bien en italique avec ton login.
+ - Adapter honnetement la section "Use of AI" du README a ton usage reel.
+ - Lancer sur la machine d'evaluation : uv sync, make lint, index,
+   search_dataset, moulinette.
+ - Ne pas versionner data/raw, data/processed, data/output (deja dans
+   .gitignore) ni les poids du modele.
+ - Etre capable d'expliquer chaque fonction (le sujet insiste la-dessus).

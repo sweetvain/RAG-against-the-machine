@@ -81,7 +81,10 @@ def _read_source_text(source: MinimalSource) -> str:
         if the file is unreadable.
     """
     try:
-        content = Path(source.file_path).read_text(encoding="utf-8")
+        with Path(source.file_path).open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            content = handle.read()
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
             "Unable to re-read source %s: %s",

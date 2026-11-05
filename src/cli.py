@@ -1,5 +1,6 @@
 import logging
 import sys
+from typing import Any
 
 import fire
 
@@ -22,6 +23,47 @@ logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _validate_int(name: str, value: Any, minimum: int) -> int:
+    """Validates an integer CLI argument and exits cleanly if it is invalid.
+
+    Args:
+        name: Argument name, used in the error message.
+        value: Raw value parsed by Fire (may be of any type).
+        minimum: Smallest accepted value.
+
+    Returns:
+        The validated integer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.error("--%s must be an integer, got %r", name, value)
+        sys.exit(1)
+    if value < minimum:
+        logger.error("--%s must be >= %d, got %d", name, minimum, value)
+        sys.exit(1)
+    return value
+
+
+def _validate_text(name: str, value: Any) -> str:
+    """Validates a text CLI argument and exits cleanly if it is invalid.
+
+    Fire converts numeric-looking arguments to numbers, so they are turned
+    back into strings. Empty strings are rejected.
+
+    Args:
+        name: Argument name, used in the error message.
+        value: Raw value parsed by Fire.
+
+    Returns:
+        The validated string.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)
+    if not isinstance(value, str) or not value.strip():
+        logger.error("%s must be a non-empty string, got %r", name, value)
+        sys.exit(1)
+    return value
+
+
 class RagCLI:
     """Available commands for the RAG against the machine pipeline."""
 
@@ -38,6 +80,9 @@ class RagCLI:
             repo_path: Root directory of the corpus to ingest.
             save_directory: Directory where the index is written.
         """
+        max_chunk_size = _validate_int("max_chunk_size", max_chunk_size, 1)
+        repo_path = _validate_text("repo_path", repo_path)
+        save_directory = _validate_text("save_directory", save_directory)
         try:
             chunks = run_ingestion(
                 repo_path=repo_path,
@@ -66,9 +111,12 @@ class RagCLI:
             k: Number of results to return.
             index_directory: Directory containing the BM25 index.
         """
+        query = _validate_text("query", query)
+        k = _validate_int("k", k, 1)
+        index_directory = _validate_text("index_directory", index_directory)
         try:
             retriever, chunks_metadata = load_index(index_directory)
-        except FileNotFoundError as error:
+        except (FileNotFoundError, OSError, ValueError) as error:
             logger.error("%s", error)
             sys.exit(1)
 
@@ -90,6 +138,7 @@ class RagCLI:
         dataset_path: str,
         k: int = 10,
         save_directory: str = "data/output/search_results",
+        index_directory: str = "data/processed",
     ) -> None:
         """Runs the BM25 search on all questions in a dataset.
 
@@ -97,14 +146,20 @@ class RagCLI:
             dataset_path: Path to the JSON dataset file.
             k: Number of sources to return per question.
             save_directory: Directory where the result JSON is written.
+            index_directory: Directory containing the BM25 index.
         """
+        dataset_path = _validate_text("dataset_path", dataset_path)
+        k = _validate_int("k", k, 1)
+        save_directory = _validate_text("save_directory", save_directory)
+        index_directory = _validate_text("index_directory", index_directory)
         try:
             result = run_search_dataset(
                 dataset_path=dataset_path,
                 k=k,
                 save_directory=save_directory,
+                index_directory=index_directory,
             )
-        except (FileNotFoundError, ValueError) as error:
+        except (FileNotFoundError, OSError, ValueError) as error:
             logger.error("Search failed: %s", error)
             sys.exit(1)
 
@@ -127,9 +182,12 @@ class RagCLI:
             k: Number of sources to retrieve before generation.
             index_directory: Directory containing the BM25 index.
         """
+        query = _validate_text("query", query)
+        k = _validate_int("k", k, 1)
+        index_directory = _validate_text("index_directory", index_directory)
         try:
             result = run_answer(query, k=k, index_directory=index_directory)
-        except FileNotFoundError as error:
+        except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
             logger.error("%s", error)
             sys.exit(1)
 
@@ -148,12 +206,16 @@ class RagCLI:
                 search_dataset.
             save_directory: Directory where the result JSON is written.
         """
+        student_search_results_path = _validate_text(
+            "student_search_results_path", student_search_results_path
+        )
+        save_directory = _validate_text("save_directory", save_directory)
         try:
             result = run_answer_dataset(
                 student_search_results_path=student_search_results_path,
                 save_directory=save_directory,
             )
-        except (FileNotFoundError, ValueError) as error:
+        except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
             logger.error("Generation failed: %s", error)
             sys.exit(1)
 
@@ -177,12 +239,16 @@ class RagCLI:
             student_search_results_path: Results produced by search_dataset.
             dataset_path: Reference AnsweredQuestions dataset.
         """
+        student_search_results_path = _validate_text(
+            "student_search_results_path", student_search_results_path
+        )
+        dataset_path = _validate_text("dataset_path", dataset_path)
         try:
             result = run_evaluate(
                 student_search_results_path=student_search_results_path,
                 dataset_path=dataset_path,
             )
-        except (FileNotFoundError, ValueError) as error:
+        except (FileNotFoundError, OSError, ValueError) as error:
             logger.error("Evaluation failed: %s", error)
             sys.exit(1)
 

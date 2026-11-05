@@ -95,61 +95,12 @@ def search(
     if not query_tokens[0]:
         return []
 
-    retrieval_window = min(
-        max(effective_k * 15, effective_k),
-        min(len(chunks_metadata), 300),
-    )
-    results, scores = retriever.retrieve(query_tokens, k=retrieval_window)
+    results, _scores = retriever.retrieve(query_tokens, k=effective_k)
 
-    query_terms = set(query_tokens[0])
-    reranked_candidates = []
-    for idx, score in zip(results[0], scores[0]):
-        candidate = chunks_metadata[int(idx)]["metadata"]
-        adjusted_score = float(score) + _candidate_bonus(
-            candidate, query_terms
-        )
-        reranked_candidates.append(
-            (adjusted_score, float(score), int(idx))
-        )
-
-    reranked_candidates.sort(reverse=True)
-
-    sources: List[MinimalSource] = []
-    for _adjusted_score, _base_score, idx in reranked_candidates[:effective_k]:
-        meta = chunks_metadata[idx]["metadata"]
-        sources.append(MinimalSource.model_validate(meta))
-    return sources
-
-
-def _candidate_bonus(
-    source: MinimalSource,
-    query_terms: set[str],
-) -> float:
-    """Applies a small heuristic bonus to documentation files.
-
-    The first BM25 pass keeps the main lexical signal. This helper only
-    reorders the best candidates to favor Markdown files and docs paths, which
-    often match the reference sources in docs datasets.
-    """
-    path = Path(source.file_path)
-    path_text = path.as_posix().lower()
-
-    bonus = 0.0
-    if "/docs/" in path_text:
-        bonus += 0.80
-    if path.suffix == ".md":
-        bonus += 0.30
-    if any(
-        part in {"tests", "examples", "benchmarks", ".buildkite"}
-        for part in path.parts
-    ):
-        bonus -= 0.50
-
-    path_terms = set(tokenize_corpus([source.file_path])[0])
-    overlap = len(query_terms & path_terms)
-    bonus += min(overlap, 5) * 0.12
-
-    return bonus
+    return [
+        MinimalSource.model_validate(chunks_metadata[int(idx)]["metadata"])
+        for idx in results[0]
+    ]
 
 
 def load_dataset_questions(dataset_path: str) -> List[Dict[str, Any]]:
