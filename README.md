@@ -189,7 +189,12 @@ a few seconds per question on CPU.
   [uv](https://docs.astral.sh/uv/), [tqdm](https://tqdm.github.io/)
 - [vLLM](https://github.com/vllm-project/vllm) (the indexed corpus)
 
-**Use of AI**: AI assistants were used to review the code against the subject,
-to help diagnose the Windows path/offset bugs, to write unit tests and to
-draft this README. Every change was run and checked (recall measured on the
-datasets, flake8, mypy, pytest) and is understood by the author.
+**Use of AI**: I used an AI assistant for the following tasks:
+
+- to understand the notions of the subject that I did not know;
+- to rewrite my code in a cleaner way;
+- to follow the coding standard (the norm);
+- to write the tests in `tests/` and to help write this README.
+
+I ran every change myself (recall measured on the public datasets, flake8,
+mypy, pytest) and I checked that I understand the code before keeping it.

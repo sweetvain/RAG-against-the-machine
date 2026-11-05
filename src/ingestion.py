@@ -2,7 +2,7 @@ import logging
 import pickle
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import bm25s
 from bm25s.stopwords import STOPWORDS_EN
@@ -71,77 +71,73 @@ def read_repository(
     return valid_files
 
 
-def _make_chunk(
-    file_path: Path,
-    text: str,
-    start: int,
-    end: int,
-) -> Dict[str, Any]:
-    """Builds a chunk covering text[start:end] (end exclusive).
+def make_chunk(file_path: Path, text: str, start: int, end: int) -> Dict[str, Any]:
+    """Builds one chunk from text[start:end] (end is excluded).
 
-    The content is the exact slice of the file, so that the stored character
-    range always matches the content.
-    """
-    return {
-        "content": text[start:end],
-        "metadata": MinimalSource(
-            file_path=file_path.as_posix(),
-            first_character_index=start,
-            last_character_index=end - 1,
-        ).model_dump(),
-    }
-
-
-def _split_by_boundaries(
-    file_path: Path,
-    lines: List[str],
-    is_boundary: Callable[[str], bool],
-    max_chunk_size: int,
-) -> List[Dict[str, Any]]:
-    """Splits lines into chunks starting at boundary lines.
-
-    A chunk is closed when a boundary line is met, and whenever it would exceed
-    max_chunk_size (cut on the last newline when possible, hard cut otherwise).
-    No chunk is ever longer than max_chunk_size.
+    The content is the exact part of the file, so the character indexes
+    always match the content.
 
     Args:
         file_path: Source file path.
-        lines: File lines from splitlines(keepends=True).
-        is_boundary: Tells whether a line starts a new logical block.
+        text: Full text of the file.
+        start: Index of the first character of the chunk.
+        end: Index just after the last character of the chunk.
+
+    Returns:
+        A dictionary with "content" and "metadata".
+    """
+    source = MinimalSource(
+        file_path=file_path.as_posix(),
+        first_character_index=start,
+        last_character_index=end - 1,
+    )
+    return {"content": text[start:end], "metadata": source.model_dump()}
+
+
+def split_into_chunks(
+    file_path: Path,
+    text: str,
+    block_starts: List[int],
+    max_chunk_size: int,
+) -> List[Dict[str, Any]]:
+    """Cuts a text into chunks.
+
+    The text is first cut at every position of block_starts (the start of a
+    function, a class or a title). If a block is longer than max_chunk_size,
+    it is cut again: at the last line break before the limit if there is one,
+    otherwise exactly at the limit.
+
+    Args:
+        file_path: Source file path.
+        text: Full text of the file.
+        block_starts: Sorted positions where a new block begins.
         max_chunk_size: Maximum number of characters in one chunk.
 
     Returns:
         A list of chunks with "content" and "metadata" entries.
+
+    Raises:
+        ValueError: If max_chunk_size is lower than 1.
     """
     if max_chunk_size < 1:
         raise ValueError("max_chunk_size must be at least 1")
 
-    text = "".join(lines)
     chunks: List[Dict[str, Any]] = []
-    start = 0
-    position = 0
+    block_ends = block_starts[1:] + [len(text)]
 
-    def flush(end: int) -> None:
-        if end > start and text[start:end].strip():
-            chunks.append(_make_chunk(file_path, text, start, end))
-
-    for line in lines:
-        starts_block = is_boundary(line)
-        if starts_block and position > start:
-            flush(position)
-            start = position
-
-        position += len(line)
-
-        while position - start > max_chunk_size:
-            window_end = start + max_chunk_size
-            cut = text.rfind("\n", start, window_end) + 1
+    for block_start, block_end in zip(block_starts, block_ends):
+        start = block_start
+        while block_end - start > max_chunk_size:
+            limit = start + max_chunk_size
+            cut = text.rfind("\n", start, limit) + 1
             if cut <= start:
-                cut = window_end
-            flush(cut)
+                cut = limit
+            if text[start:cut].strip():
+                chunks.append(make_chunk(file_path, text, start, cut))
             start = cut
+        if text[start:block_end].strip():
+            chunks.append(make_chunk(file_path, text, start, block_end))
 
-    flush(position)
     return chunks
 
 
@@ -172,20 +168,10 @@ def chunk_section(
     lines = content.splitlines(keepends=True)
 
     if file_path.suffix == ".md":
-        return chunk_md_file(file_path, lines, max_chunk_size=max_chunk_size)
-
+        return chunk_md_file(file_path, lines, max_chunk_size)
     if file_path.suffix == ".py":
-        return chunk_python_file(
-            file_path,
-            lines,
-            max_chunk_size=max_chunk_size,
-        )
-
-    return chunk_other_file(
-        file_path,
-        lines,
-        max_chunk_size=max_chunk_size,
-    )
+        return chunk_python_file(file_path, lines, max_chunk_size)
+    return chunk_other_file(file_path, lines, max_chunk_size)
 
 
 def chunk_md_file(
@@ -193,9 +179,9 @@ def chunk_md_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Splits a Markdown file into chunks by headings (#, ##, ...).
+    """Splits a Markdown file into chunks, one per title (#, ##, ...).
 
-    Headings inside fenced code blocks are not treated as boundaries.
+    A line starting with # inside a code block (```) is not a title.
 
     Args:
         file_path: Source file path.
@@ -205,17 +191,21 @@ def chunk_md_file(
     Returns:
         A list of chunks with "content" and "metadata" entries.
     """
-    in_fence = False
+    block_starts = [0]
+    in_code_block = False
+    position = 0
 
-    def is_heading(line: str) -> bool:
-        nonlocal in_fence
+    for line in lines:
         stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
-            return False
-        return not in_fence and stripped.startswith("#")
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_code_block = not in_code_block
+        elif stripped.startswith("#") and not in_code_block and position > 0:
+            block_starts.append(position)
+        position += len(line)
 
-    return _split_by_boundaries(file_path, lines, is_heading, max_chunk_size)
+    return split_into_chunks(
+        file_path, "".join(lines), block_starts, max_chunk_size
+    )
 
 
 def chunk_python_file(
@@ -223,9 +213,10 @@ def chunk_python_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Splits a Python file into chunks by definitions (def/class).
+    """Splits a Python file into chunks, one per function or class.
 
-    Decorators are kept with the definition they decorate.
+    A decorator (@something) stays in the same chunk as the function that
+    follows it.
 
     Args:
         file_path: Source file path.
@@ -235,22 +226,27 @@ def chunk_python_file(
     Returns:
         A list of chunks with "content" and "metadata" entries.
     """
-    previous_is_decorator = False
+    block_starts = [0]
+    after_decorator = False
+    position = 0
 
-    def is_definition(line: str) -> bool:
-        nonlocal previous_is_decorator
+    for line in lines:
         stripped = line.strip()
         is_decorator = stripped.startswith("@")
-        starts_block = stripped.startswith(
-            ("def ", "class ", "async def ")
-        ) or is_decorator
-        boundary = starts_block and not previous_is_decorator
-        if stripped:
-            previous_is_decorator = is_decorator
-        return boundary
+        is_definition = (
+            stripped.startswith("def ")
+            or stripped.startswith("async def ")
+            or stripped.startswith("class ")
+        )
+        if (is_decorator or is_definition) and not after_decorator:
+            if position > 0:
+                block_starts.append(position)
+        if stripped != "":
+            after_decorator = is_decorator
+        position += len(line)
 
-    return _split_by_boundaries(
-        file_path, lines, is_definition, max_chunk_size
+    return split_into_chunks(
+        file_path, "".join(lines), block_starts, max_chunk_size
     )
 
 
@@ -259,7 +255,7 @@ def chunk_other_file(
     lines: List[str],
     max_chunk_size: int = 2000,
 ) -> List[Dict[str, Any]]:
-    """Generic size-based splitting for other text files (e.g. .txt).
+    """Splits any other text file (for example .txt) by size only.
 
     Args:
         file_path: Source file path.
@@ -269,9 +265,7 @@ def chunk_other_file(
     Returns:
         A list of chunks with "content" and "metadata" entries.
     """
-    return _split_by_boundaries(
-        file_path, lines, lambda _line: False, max_chunk_size
-    )
+    return split_into_chunks(file_path, "".join(lines), [0], max_chunk_size)
 
 
 def tokenize_text(text: str) -> List[str]:
